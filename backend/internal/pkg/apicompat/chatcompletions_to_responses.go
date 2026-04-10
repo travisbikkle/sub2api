@@ -380,6 +380,136 @@ func stringPtr(s string) *string {
 	return &s
 }
 
+// ResponsesToChatCompletionsRequest converts a Responses API request into a
+// Chat Completions request for sending to an OpenAI-compatible upstream
+// that expects /v1/chat/completions format.
+func ResponsesToChatCompletionsRequest(req *ResponsesRequest) (*ChatCompletionsRequest, error) {
+	// Extract messages from Responses input
+	messages, err := convertResponsesInputToChatMessages(req.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &ChatCompletionsRequest{
+		Model:          req.Model,
+		Messages:       messages,
+		Temperature:    req.Temperature,
+		TopP:           req.TopP,
+		Stream:         req.Stream,
+		MaxTokens:      req.MaxOutputTokens,
+		ServiceTier:    req.ServiceTier,
+		ReasoningEffort: getReasoningEffortFromResponses(req),
+	}
+
+	// Convert tools
+	if len(req.Tools) > 0 {
+		out.Tools = convertResponsesToolsToChat(req.Tools)
+	}
+
+	// tool_choice
+	if len(req.ToolChoice) > 0 {
+		out.ToolChoice = req.ToolChoice
+	}
+
+	return out, nil
+}
+
+// convertResponsesInputToChatMessages converts Responses input items into
+// Chat Completions messages array.
+func convertResponsesInputToChatMessages(input []ResponsesInputItem) ([]ChatMessage, error) {
+	var messages []ChatMessage
+
+	for _, item := range input {
+		switch item.Role {
+		case "system":
+			content := extractTextFromResponsesContent(item.Content)
+			messages = append(messages, ChatMessage{
+				Role:    "system",
+				Content: mustMarshalJSON(content),
+			})
+		case "user":
+			content := extractTextFromResponsesContent(item.Content)
+			messages = append(messages, ChatMessage{
+				Role:    "user",
+				Content: mustMarshalJSON(content),
+			})
+		case "assistant":
+			content := extractTextFromResponsesContent(item.Content)
+			messages = append(messages, ChatMessage{
+				Role:    "assistant",
+				Content: mustMarshalJSON(content),
+			})
+		// function_call and function_call_output are handled as tool calls and tool responses
+		case "function_call":
+			// We handle this in the previous assistant message
+		case "function_call_output":
+			// Attach as tool response to the previous message if possible, otherwise just create a new tool message
+			if len(messages) > 0 {
+				// For simplicity, just create a tool message
+				messages = append(messages, ChatMessage{
+					Role:     "tool",
+					Content:  mustMarshalJSON(item.Output),
+					ToolCallID: item.CallID,
+				})
+			}
+		}
+	}
+
+	return messages, nil
+}
+
+// extractTextFromResponsesContent extracts the concatenated text content from
+// a Responses content array. Only text parts are extracted, images are ignored.
+func extractTextFromResponsesContent(raw json.RawMessage) string {
+	var parts []ResponsesContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return ""
+	}
+
+	var text strings.Builder
+	for _, part := range parts {
+		if part.Type == "input_text" && part.Text != "" {
+			text.WriteString(part.Text)
+		}
+	}
+	return text.String()
+}
+
+// convertResponsesToolsToChat converts Responses tool definitions to
+// Chat Completions tool definitions.
+func convertResponsesToolsToChat(tools []ResponsesTool) []ChatTool {
+	var out []ChatTool
+
+	for _, t := range tools {
+		if t.Type == "function" {
+			out = append(out, ChatTool{
+				Type: "function",
+				Function: ChatFunctionCall{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  t.Parameters,
+				},
+			})
+		}
+	}
+
+	return out
+}
+
+// getReasoningEffortFromResponses extracts reasoning effort from Responses request.
+func getReasoningEffortFromResponses(req *ResponsesRequest) string {
+	if req.Reasoning != nil {
+		return req.Reasoning.Effort
+	}
+	return ""
+}
+
+// mustMarshalJSON marshals to JSON and panics on error (never happens for string).
+func mustMarshalJSON(s string) json.RawMessage {
+	data, _ := json.Marshal(s)
+	return data
+}
+
 // convertChatToolsToResponses maps Chat Completions tool definitions and legacy
 // function definitions to Responses API tool definitions.
 func convertChatToolsToResponses(tools []ChatTool, functions []ChatFunction) []ResponsesTool {

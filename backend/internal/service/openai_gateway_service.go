@@ -3176,6 +3176,22 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	}
 	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
 
+	// If upstream endpoint is /chat/completions, convert Responses format to Chat Completions format
+	if strings.HasSuffix(strings.TrimRight(targetURL, "/"), "/chat/completions") {
+		var responsesReq apicompat.ResponsesRequest
+		if err := json.Unmarshal(body, &responsesReq); err != nil {
+			return nil, fmt.Errorf("parse responses request for conversion: %w", err)
+		}
+		chatReq, err := apicompat.ResponsesToChatCompletionsRequest(&responsesReq)
+		if err != nil {
+			return nil, fmt.Errorf("convert responses to chat completions: %w", err)
+		}
+		body, err = json.Marshal(chatReq)
+		if err != nil {
+			return nil, fmt.Errorf("marshal chat completions request: %w", err)
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -4180,7 +4196,7 @@ func (s *OpenAIGatewayService) validateUpstreamBaseURL(raw string) (string, erro
 // - 其他情况：追加 /v1/responses
 func buildOpenAIResponsesURL(base string) string {
 	normalized := strings.TrimRight(strings.TrimSpace(base), "/")
-	if strings.HasSuffix(normalized, "/responses") {
+	if strings.HasSuffix(normalized, "/responses") || strings.HasSuffix(normalized, "/chat/completions") {
 		return normalized
 	}
 	if strings.HasSuffix(normalized, "/v1") {
