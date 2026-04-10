@@ -461,7 +461,11 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
 		}
-		apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/responses"
+		if strings.HasSuffix(normalizedBaseURL, "/responses") || strings.HasSuffix(normalizedBaseURL, "/chat/completions") {
+			apiURL = normalizedBaseURL
+		} else {
+			apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/responses"
+		}
 	} else {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}
