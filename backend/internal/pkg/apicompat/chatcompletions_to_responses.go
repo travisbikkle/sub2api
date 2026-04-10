@@ -385,20 +385,25 @@ func stringPtr(s string) *string {
 // that expects /v1/chat/completions format.
 func ResponsesToChatCompletionsRequest(req *ResponsesRequest) (*ChatCompletionsRequest, error) {
 	// Extract messages from Responses input
-	messages, err := convertResponsesInputToChatMessages(req.Input)
+	var input []ResponsesInputItem
+	if err := json.Unmarshal(req.Input, &input); err != nil {
+		return nil, err
+	}
+	messages, err := convertResponsesInputToChatMessages(input)
 	if err != nil {
 		return nil, err
 	}
 
 	out := &ChatCompletionsRequest{
-		Model:          req.Model,
-		Messages:       messages,
-		Temperature:    req.Temperature,
-		TopP:           req.TopP,
-		Stream:         req.Stream,
-		MaxTokens:      req.MaxOutputTokens,
-		ServiceTier:    req.ServiceTier,
-		ReasoningEffort: getReasoningEffortFromResponses(req),
+		Model:               req.Model,
+		Messages:            messages,
+		Temperature:         req.Temperature,
+		TopP:                req.TopP,
+		Stream:              req.Stream,
+		MaxTokens:           req.MaxOutputTokens,
+		MaxCompletionTokens: req.MaxOutputTokens,
+		ServiceTier:         req.ServiceTier,
+		ReasoningEffort:     getReasoningEffortFromResponses(req),
 	}
 
 	// Convert tools
@@ -420,39 +425,24 @@ func convertResponsesInputToChatMessages(input []ResponsesInputItem) ([]ChatMess
 	var messages []ChatMessage
 
 	for _, item := range input {
-		switch item.Role {
-		case "system":
+		switch {
+		case item.Role != "":
+			// Regular role-based messages (system, user, assistant)
 			content := extractTextFromResponsesContent(item.Content)
 			messages = append(messages, ChatMessage{
-				Role:    "system",
+				Role:    item.Role,
 				Content: mustMarshalJSON(content),
 			})
-		case "user":
-			content := extractTextFromResponsesContent(item.Content)
+		case item.Type == "function_call_output":
+			// Tool output -> create tool message
 			messages = append(messages, ChatMessage{
-				Role:    "user",
-				Content: mustMarshalJSON(content),
+				Role:       "tool",
+				Content:    mustMarshalJSON(item.Output),
+				ToolCallID: item.CallID,
 			})
-		case "assistant":
-			content := extractTextFromResponsesContent(item.Content)
-			messages = append(messages, ChatMessage{
-				Role:    "assistant",
-				Content: mustMarshalJSON(content),
-			})
-		// function_call and function_call_output are handled as tool calls and tool responses
-		case "function_call":
-			// We handle this in the previous assistant message
-		case "function_call_output":
-			// Attach as tool response to the previous message if possible, otherwise just create a new tool message
-			if len(messages) > 0 {
-				// For simplicity, just create a tool message
-				messages = append(messages, ChatMessage{
-					Role:     "tool",
-					Content:  mustMarshalJSON(item.Output),
-					ToolCallID: item.CallID,
-				})
-			}
 		}
+		// Note: function_call items are already included in the assistant message
+		// content in Responses format, so they don't need separate handling here for basic usage
 	}
 
 	return messages, nil
@@ -461,9 +451,17 @@ func convertResponsesInputToChatMessages(input []ResponsesInputItem) ([]ChatMess
 // extractTextFromResponsesContent extracts the concatenated text content from
 // a Responses content array. Only text parts are extracted, images are ignored.
 func extractTextFromResponsesContent(raw json.RawMessage) string {
+	if raw == nil {
+		return ""
+	}
 	var parts []ResponsesContentPart
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		return ""
+		// If it's just a plain string, try unmarshal as string
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return ""
+		}
+		return s
 	}
 
 	var text strings.Builder
@@ -484,10 +482,11 @@ func convertResponsesToolsToChat(tools []ResponsesTool) []ChatTool {
 		if t.Type == "function" {
 			out = append(out, ChatTool{
 				Type: "function",
-				Function: ChatFunctionCall{
+				Function: &ChatFunction{
 					Name:        t.Name,
 					Description: t.Description,
 					Parameters:  t.Parameters,
+					Strict:      t.Strict,
 				},
 			})
 		}
